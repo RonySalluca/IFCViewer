@@ -57,6 +57,7 @@ export type EngineCallbacks = {
   onProjectionChange?: (isOrtho: boolean) => void;
   onCategoriesChange?: (categories: CategoryInfo[]) => void;
   onAlignmentsChange?: (alignments: AlignmentData[]) => void;
+  onStationChange?: (station: number | null, elevation: number | null) => void;
 };
 
 export class BimEngine {
@@ -68,7 +69,12 @@ export class BimEngine {
   private lengthMeasurement?: OBF.LengthMeasurement;
   private clipper?: OBC.Clipper;
   private clipStyler?: OBF.ClipStyler;
-  private civilNavigators?: OBF.CivilNavigators;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private planNavigator: any = null;
+  private crossNavigator: OBF.CivilCrossSectionNavigator | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private planWorld: any = null;
+  private civilPanelsReady = false;
   private loadedAlignmentObjects = new Map<string, THREE.Object3D>();
   private callbacks: EngineCallbacks = {};
   private loadedModels = new Map<string, LoadedModel>();
@@ -213,13 +219,6 @@ export class BimEngine {
     this.keyHandler = (e: KeyboardEvent) => this.handleKey(e);
     window.addEventListener("keydown", this.keyHandler);
 
-    // Civil navigator — used when IFC models contain alignment data
-    try {
-      this.civilNavigators = components.get(OBF.CivilNavigators);
-    } catch {
-      // Civil components not available
-    }
-
     this.emitStatus("ready", "Motor listo");
   }
 
@@ -337,7 +336,7 @@ export class BimEngine {
     if (model) {
       this.world?.scene.three.remove(model.object);
     }
-    // Remove alignment geometry if any
+    // Remove alignment geometry from scene
     const alignObj = this.loadedAlignmentObjects.get(modelId);
     if (alignObj) {
       this.world?.scene.three.remove(alignObj);
@@ -345,6 +344,18 @@ export class BimEngine {
     }
     this.alignments = this.alignments.filter((a) => a.modelId !== modelId);
     this.callbacks.onAlignmentsChange?.([...this.alignments]);
+
+    // Rebuild plan navigator alignments list after removal
+    if (this.civilPanelsReady && this.planNavigator) {
+      try {
+        this.planNavigator.alignments = [];
+        for (const [, alignObj] of this.loadedAlignmentObjects) {
+          const group = alignObj as THREE.Group;
+          this.planNavigator.alignments.push(group);
+          try { this.planNavigator.createStations(group); } catch { /* ignore */ }
+        }
+      } catch { /* ignore */ }
+    }
 
     this.fragments.core.disposeModel(modelId);
     this.loadedModels.delete(modelId);
@@ -473,7 +484,8 @@ export class BimEngine {
   }
 
   private async extractAlignments(modelId: string) {
-    if (!this.fragments || !this.world) return;
+    if (!this.fragments || !this.world || !this.components) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fragModel = this.fragments.list.get(modelId) as any;
     if (!fragModel) return;
 
@@ -481,6 +493,7 @@ export class BimEngine {
       const alignmentObj: THREE.Object3D = await fragModel.getAlignments();
       if (!alignmentObj) return;
 
+      // Add alignment geometry to the 3D scene
       this.world.scene.three.add(alignmentObj);
       this.loadedAlignmentObjects.set(modelId, alignmentObj);
 
@@ -489,15 +502,13 @@ export class BimEngine {
       const elevations: number[] = [];
 
       alignmentObj.traverse((child: THREE.Object3D) => {
-        // Read userData if present
         if (typeof child.userData?.initialStation === "number" && !isNaN(child.userData.initialStation)) {
           initialStation = child.userData.initialStation;
         }
         if (typeof child.userData?.length === "number" && !isNaN(child.userData.length) && child.userData.length > 0) {
           totalLength = Math.max(totalLength, child.userData.length);
         }
-
-        // Compute length from line geometry when userData is missing/zero
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const line = child as any;
         if (line.isLine || line.isLineSegments) {
           const geo: THREE.BufferGeometry = line.geometry;
@@ -515,7 +526,6 @@ export class BimEngine {
         }
       });
 
-      // No civil navigator — it produces NaN labels with this model's data format
       const stationData: AlignmentStation[] = [];
       if (totalLength > 0) {
         const steps = Math.min(20, Math.max(5, Math.floor(totalLength / 50)));
@@ -526,7 +536,6 @@ export class BimEngine {
 
         for (let i = 0; i <= steps; i++) {
           const s = initialStation + i * stepSize;
-          // Interpolate elevation if we have a meaningful range
           const elev = hasRealElev
             ? elevMin + ((elevMax - elevMin) * i) / steps
             : 0;
@@ -547,9 +556,113 @@ export class BimEngine {
 
       this.alignments = [...this.alignments.filter((a) => a.modelId !== modelId), alignData];
       this.callbacks.onAlignmentsChange?.([...this.alignments]);
+
+      // Register with plan navigator if 2D panels are already set up
+      if (this.civilPanelsReady && this.planNavigator) {
+        const group = alignmentObj as THREE.Group;
+        if (!this.planNavigator.alignments.includes(group)) {
+          this.planNavigator.alignments.push(group);
+          try { this.planNavigator.createStations(group); } catch { /* ignore */ }
+        }
+      }
     } catch {
-      // Model has no alignment data — stay silent
+      // Model has no alignment data
     }
+  }
+
+  /**
+   * Call once (lazily) when the React UI mounts the 2D panel containers.
+   * Uses the actual v3.4.3 API: CivilNavigators + CivilCrossSectionNavigator.
+   */
+  async setupCivilPanels(planEl: HTMLElement, _elevEl: HTMLElement, _crossEl: HTMLElement) {
+    if (!this.components || !this.world || this.civilPanelsReady) return;
+
+    try {
+      const worlds = this.components.get(OBC.Worlds);
+
+      // ── Plan 2D world (RendererWith2D for CSS2D station labels) ────────────
+      this.planWorld = worlds.create();
+      this.planWorld.scene = new OBC.SimpleScene(this.components);
+      this.planWorld.renderer = new OBF.RendererWith2D(this.components, planEl);
+      this.planWorld.camera = new OBC.OrthoPerspectiveCamera(this.components);
+      (this.planWorld.scene as OBC.SimpleScene).setup();
+
+      // ── Civil navigators (v3.4.3 API) ─────────────────────────────────────
+      const civilNavigators = this.components.get(OBF.CivilNavigators);
+      this.planNavigator = civilNavigators.create("plan-view");
+      this.planNavigator.world = this.planWorld;
+
+      // ── Cross-section navigator (renders in the main 3D world) ─────────────
+      this.crossNavigator = this.components.get(OBF.CivilCrossSectionNavigator);
+      this.crossNavigator.world = this.world;
+
+      // ── Wire plan → cross-section event ────────────────────────────────────
+      this.planNavigator.onMarkerChange.add(({ point, normal }: OBF.CivilPoint) => {
+        try {
+          void this.crossNavigator?.set(point, normal);
+          const alignment = this.alignments[0];
+          if (alignment) {
+            const dist = this.computeStationFromPoint(point, alignment);
+            this.callbacks.onStationChange?.(dist, null);
+          }
+        } catch { /* ignore */ }
+      });
+
+      this.civilPanelsReady = true;
+
+      // Add already-loaded alignments to the plan navigator
+      for (const [, alignObj] of this.loadedAlignmentObjects) {
+        const group = alignObj as THREE.Group;
+        if (!this.planNavigator.alignments.includes(group)) {
+          this.planNavigator.alignments.push(group);
+          try { this.planNavigator.createStations(group); } catch { /* no station userData */ }
+        }
+      }
+    } catch {
+      // Civil 2D components not available in this environment
+    }
+  }
+
+  private computeStationFromPoint(point: THREE.Vector3, alignment: AlignmentData): number {
+    // Find the closest point along the loaded alignment geometry and return its station value
+    const alignObj = this.loadedAlignmentObjects.get(alignment.modelId);
+    if (!alignObj) return alignment.initialStation;
+    let minDist = Infinity;
+    let closestFraction = 0;
+    alignObj.traverse((child) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const line = child as any;
+      if (!(line.isLine || line.isLineSegments)) return;
+      const pos = line.geometry?.attributes?.position;
+      if (!pos) return;
+      let lineLen = 0;
+      const segLens: number[] = [];
+      for (let i = 0; i < pos.count - 1; i++) {
+        const dx = pos.getX(i + 1) - pos.getX(i);
+        const dy = pos.getY(i + 1) - pos.getY(i);
+        const dz = pos.getZ(i + 1) - pos.getZ(i);
+        const l = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        segLens.push(l);
+        lineLen += l;
+      }
+      let walked = 0;
+      for (let i = 0; i < pos.count - 1; i++) {
+        const ax = pos.getX(i), ay = pos.getY(i), az = pos.getZ(i);
+        const bx = pos.getX(i + 1), by = pos.getY(i + 1), bz = pos.getZ(i + 1);
+        const t = Math.max(0, Math.min(1,
+          ((point.x - ax) * (bx - ax) + (point.y - ay) * (by - ay) + (point.z - az) * (bz - az))
+          / (segLens[i] * segLens[i] || 1)
+        ));
+        const cx = ax + t * (bx - ax), cy = ay + t * (by - ay), cz = az + t * (bz - az);
+        const d = Math.sqrt((point.x - cx) ** 2 + (point.y - cy) ** 2 + (point.z - cz) ** 2);
+        if (d < minDist) {
+          minDist = d;
+          closestFraction = (walked + t * segLens[i]) / (lineLen || 1);
+        }
+        walked += segLens[i];
+      }
+    });
+    return alignment.initialStation + closestFraction * alignment.length;
   }
 
   private async resolveSelection(

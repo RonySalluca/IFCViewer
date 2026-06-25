@@ -52,10 +52,14 @@ const tools: Array<{ key: ToolKey; label: string; icon: typeof Ruler; hint?: str
 ];
 
 function App() {
-  const viewportRef  = useRef<HTMLDivElement | null>(null);
-  const engineRef    = useRef<BimEngine | null>(null);
-  const ifcInputRef  = useRef<HTMLInputElement>(null);
-  const fragInputRef = useRef<HTMLInputElement>(null);
+  const viewportRef   = useRef<HTMLDivElement | null>(null);
+  const planPanelRef  = useRef<HTMLDivElement | null>(null);
+  const elevPanelRef  = useRef<HTMLDivElement | null>(null);
+  const crossPanelRef = useRef<HTMLDivElement | null>(null);
+  const engineRef     = useRef<BimEngine | null>(null);
+  const ifcInputRef   = useRef<HTMLInputElement>(null);
+  const fragInputRef  = useRef<HTMLInputElement>(null);
+  const panelsInited  = useRef(false);
 
   const [status,       setStatus]       = useState<EngineStatus>("idle");
   const [message,      setMessage]      = useState("Inicializando interfaz");
@@ -69,6 +73,7 @@ function App() {
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("models");
   const [isDragging,   setIsDragging]   = useState(false);
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<"3d" | "plan" | "profile" | "section">("3d");
 
   // Engine initialization
   useEffect(() => {
@@ -90,6 +95,7 @@ function App() {
       onProjectionChange:  setIsOrtho,
       onCategoriesChange:  setCategories,
       onAlignmentsChange:  setAlignments,
+      onStationChange: () => { /* future: highlight station in list */ },
     }).catch((err) => {
       setStatus("error");
       setMessage(err instanceof Error ? err.message : "Error al iniciar motor");
@@ -154,6 +160,19 @@ function App() {
   };
 
   const activeTip = tools.find((t) => t.key === activeTool)?.hint;
+
+  const handleViewTab = (view: "3d" | "plan" | "profile" | "section") => {
+    setActiveView(view);
+    if (view !== "3d" && !panelsInited.current) {
+      const plan  = planPanelRef.current;
+      const elev  = elevPanelRef.current;
+      const cross = crossPanelRef.current;
+      if (plan && elev && cross && engineRef.current) {
+        panelsInited.current = true;
+        void engineRef.current.setupCivilPanels(plan, elev, cross);
+      }
+    }
+  };
 
   // Primary alignment (first model that has one)
   const primaryAlignment = alignments[0] ?? null;
@@ -234,10 +253,10 @@ function App() {
               </button>
             </div>
             <div className="view-tabs">
-              <button className="active">3D</button>
-              <button>Planta</button>
-              <button>Seccion</button>
-              <button>Perfil</button>
+              <button className={activeView === "3d" ? "active" : ""} onClick={() => handleViewTab("3d")}>3D</button>
+              <button className={activeView === "plan" ? "active" : ""} onClick={() => handleViewTab("plan")}>Planta</button>
+              <button className={activeView === "section" ? "active" : ""} onClick={() => handleViewTab("section")}>Sección</button>
+              <button className={activeView === "profile" ? "active" : ""} onClick={() => handleViewTab("profile")}>Perfil</button>
             </div>
           </div>
 
@@ -247,9 +266,13 @@ function App() {
             <span>{activeTip ?? ""}</span>
           </div>
 
-          {/* 3D Viewport */}
-          <div className={`viewport ${isDragging ? "dragging" : ""}`} ref={viewportRef}
-            onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+          {/* 3D Viewport — always mounted so WebGL context is preserved */}
+          <div
+            className={`viewport ${isDragging ? "dragging" : ""}`}
+            ref={viewportRef}
+            style={{ display: activeView === "3d" ? undefined : "none" }}
+            onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}
+          >
             {isDragging && (
               <div className="drag-overlay">
                 <Layers size={32} />
@@ -263,8 +286,6 @@ function App() {
                 <span>Acepta .ifc, .ifczip o .frag. Puedes federar varios modelos en la misma escena.</span>
               </div>
             )}
-
-            {/* Quick visibility legend — shown when models are loaded */}
             {models.length > 0 && (
               <div className="visibility-legend">
                 {models.map((model) => (
@@ -280,31 +301,47 @@ function App() {
             )}
           </div>
 
-          {/* Longitudinal profile — only shown when an alignment model is loaded */}
-          <section className="profile-panel">
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">Perfil longitudinal</span>
-                <h2>
-                  {primaryAlignment
-                    ? `${primaryAlignment.name} · ${primaryAlignment.length.toFixed(0)} m`
-                    : "Sin datos de alineamiento"}
-                </h2>
+          {/* 2D civil panels — always in DOM; shown/hidden via CSS */}
+          <div className="civil-panel" style={{ display: activeView === "plan" ? undefined : "none" }}>
+            <div className="civil-panel-label">Planta — Alineamiento horizontal</div>
+            <div className="civil-canvas" ref={planPanelRef} />
+          </div>
+          <div className="civil-panel" style={{ display: activeView === "profile" ? undefined : "none" }}>
+            <div className="civil-panel-label">Perfil longitudinal — Alineamiento vertical</div>
+            <div className="civil-canvas" ref={elevPanelRef} />
+          </div>
+          <div className="civil-panel" style={{ display: activeView === "section" ? undefined : "none" }}>
+            <div className="civil-panel-label">Sección transversal — Click en Planta para generar</div>
+            <div className="civil-canvas" ref={crossPanelRef} />
+          </div>
+
+          {/* Summary profile strip — shown in 3D view when alignment loaded */}
+          {activeView === "3d" && (
+            <section className="profile-panel">
+              <div className="panel-heading">
+                <div>
+                  <span className="eyebrow">Perfil longitudinal</span>
+                  <h2>
+                    {primaryAlignment
+                      ? `${primaryAlignment.name} · ${primaryAlignment.length.toFixed(0)} m`
+                      : "Sin datos de alineamiento"}
+                  </h2>
+                </div>
+                {primaryAlignment && (
+                  <button title="Ver perfil completo" onClick={() => handleViewTab("profile")}>
+                    <Move3D size={16} />
+                  </button>
+                )}
               </div>
-              {primaryAlignment && (
-                <button title="Encuadrar alineamiento">
-                  <Move3D size={16} />
-                </button>
+              {primaryAlignment ? (
+                <AlignmentProfile alignment={primaryAlignment} />
+              ) : (
+                <div className="profile-empty">
+                  Carga un IFC con datos de alineamiento (IfcAlignment) para ver el perfil longitudinal.
+                </div>
               )}
-            </div>
-            {primaryAlignment ? (
-              <AlignmentProfile alignment={primaryAlignment} />
-            ) : (
-              <div className="profile-empty">
-                Carga un IFC con datos de alineamiento (IfcAlignment) para ver el perfil longitudinal.
-              </div>
-            )}
-          </section>
+            </section>
+          )}
         </section>
 
         {/* Inspector */}
