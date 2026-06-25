@@ -50,6 +50,45 @@ button {
   min-width: 1040px;
 }
 
+.app-error-shell {
+  place-items: center;
+  min-width: 0;
+  padding: 24px;
+}
+
+.app-error-card {
+  display: grid;
+  gap: 10px;
+  max-width: 520px;
+  padding: 18px;
+  border: 1px solid #d8e2ec;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 55px rgba(16, 29, 43, 0.14);
+}
+
+.app-error-card strong {
+  color: var(--ink);
+  font-size: 16px;
+}
+
+.app-error-card span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.app-error-card button {
+  justify-self: start;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 7px;
+  color: #ffffff;
+  background: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 /* ── Top bar ────────────────────────────────────────────────────────────────── */
 
 .topbar {
@@ -361,6 +400,28 @@ button {
   visibility: hidden;
 }
 
+.measurement-modes {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.measurement-modes button {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: #4f6275;
+  background: #e1e9f1;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.measurement-modes button.active {
+  color: #ffffff;
+  background: var(--accent);
+}
+
 /* Viewport */
 .viewport {
   position: relative;
@@ -482,11 +543,6 @@ button {
   fill: var(--accent);
 }
 
-.terrain {
-  stroke: #8d7b68;
-  stroke-dasharray: 5 4;
-}
-
 .grade {
   stroke: var(--accent);
 }
@@ -519,10 +575,6 @@ button {
 
 .grade-key {
   background: var(--accent);
-}
-
-.terrain-key {
-  background: #8d7b68;
 }
 
 .event-key {
@@ -878,6 +930,14 @@ h2 {
   color: var(--ink);
 }
 
+.property-note {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  background: #fbfcfe;
+}
+
 /* Nested property */
 .prop-nested {
   border-bottom: 1px solid #edf1f5;
@@ -1074,6 +1134,7 @@ h2 {
 
 .civil-panel {
   position: relative;
+  grid-row: 3 / -1;
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
@@ -1099,6 +1160,8 @@ h2 {
   width: 100%;
   height: 100%;
   position: relative;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .civil-canvas canvas {
@@ -1121,4 +1184,158 @@ h2 {
   .inspector {
     display: none;
   }
+}
+
+.civil-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.civil-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.civil-svg rect {
+  fill: #162132;
+}
+
+.civil-grid line {
+  stroke: rgba(169, 191, 212, 0.13);
+  stroke-width: 1;
+}
+
+.civil-card {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  z-index: 2;
+  display: grid;
+  gap: 4px;
+  min-width: 248px;
+  padding: 12px 14px;
+  border: 1px solid rgba(186, 208, 229, 0.28);
+  border-radius: 8px;
+  background: rgba(13, 24, 38, 0.84);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.2);
+}
+
+.civil-card span,
+.civil-card em {
+  color: #92a7bc;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.civil-card strong {
+  color: #eef7ff;
+  font-size: 16px;
+}
+
+.civil-empty-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 24px;
+  color: #c8d9e9;
+  text-align: center;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    #162132;
+  background-size: 54px 54px;
+}
+
+.civil-empty-state strong {
+  color: #eef7ff;
+  font-size: 18px;
+}
+
+.civil-empty-state span {
+  max-width: 520px;
+  color: #92a7bc;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.alignment-path {
+  fill: none;
+  stroke: #69b7ff;
+  stroke-width: 7;
+  stroke-linecap: round;
+}
+
+.alignment-halo {
+  fill: none;
+  stroke: rgba(105, 183, 255, 0.16);
+  stroke-width: 52;
+  stroke-linecap: round;
+}
+
+.station-marker,
+.profile-station {
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.station-marker line {
+  stroke: rgba(226, 239, 250, 0.55);
+  stroke-width: 1;
+}
+
+.station-marker circle,
+.profile-station circle {
+  fill: #e8f4ff;
+  stroke: #69b7ff;
+  stroke-width: 2;
+}
+
+.station-marker text,
+.profile-station text,
+.axis-title {
+  fill: #c8d9e9;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.station-marker.active circle,
+.active-station-target circle {
+  fill: #f0d24d;
+  stroke: #fff7b0;
+}
+
+.active-station-target circle {
+  fill-opacity: 0.25;
+  stroke-width: 2;
+}
+
+.active-station-target text {
+  fill: #fff7b0;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.grade-line-large {
+  fill: none;
+  stroke: #69b7ff;
+  stroke-width: 5;
+}
+
+.active-profile-line,
+.active-station-line {
+  stroke: #f0d24d !important;
+  stroke-width: 2;
+  stroke-dasharray: 6 5;
+}
+
+.station-list button.active {
+  border-color: var(--accent);
+  background: #dce9fc;
 }

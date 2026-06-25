@@ -33,6 +33,9 @@ export type AlignmentStation = {
   station: number;
   label: string;
   elevation: number;
+  x: number;
+  y: number;
+  z: number;
 };
 
 export type AlignmentData = {
@@ -46,6 +49,11 @@ export type AlignmentData = {
 };
 
 export type ActiveTool = "select" | "measure" | "sections";
+export type MeasurementKind = "length" | "area" | "angle" | "volume";
+type MeasurementTool = {
+  enabled: boolean;
+  delete?: () => void;
+};
 
 export type EngineCallbacks = {
   onStatus?: (status: EngineStatus, message?: string) => void;
@@ -67,6 +75,9 @@ export class BimEngine {
   private ifcLoader?: OBC.IfcLoader;
   private highlighter?: OBF.Highlighter;
   private lengthMeasurement?: OBF.LengthMeasurement;
+  private areaMeasurement?: OBF.AreaMeasurement;
+  private angleMeasurement?: OBF.AngleMeasurement;
+  private volumeMeasurement?: OBF.VolumeMeasurement;
   private clipper?: OBC.Clipper;
   private clipStyler?: OBF.ClipStyler;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -76,11 +87,13 @@ export class BimEngine {
   private planWorld: any = null;
   private civilPanelsReady = false;
   private loadedAlignmentObjects = new Map<string, THREE.Object3D>();
+  private navigableAlignments = new Map<string, THREE.Group[]>();
   private callbacks: EngineCallbacks = {};
   private loadedModels = new Map<string, LoadedModel>();
   private alignments: AlignmentData[] = [];
   private isOrtho = false;
   private currentTool: ActiveTool = "select";
+  private measurementKind: MeasurementKind = "length";
   private keyHandler?: (e: KeyboardEvent) => void;
 
   constructor(private readonly container: HTMLElement) {}
@@ -186,6 +199,21 @@ export class BimEngine {
     this.lengthMeasurement.color = new THREE.Color("#2d6cdf");
     this.lengthMeasurement.enabled = false;
 
+    this.areaMeasurement = components.get(OBF.AreaMeasurement);
+    this.areaMeasurement.world = world;
+    this.areaMeasurement.color = new THREE.Color("#1f9f84");
+    this.areaMeasurement.enabled = false;
+
+    this.angleMeasurement = components.get(OBF.AngleMeasurement);
+    this.angleMeasurement.world = world;
+    this.angleMeasurement.color = new THREE.Color("#c0802b");
+    this.angleMeasurement.enabled = false;
+
+    this.volumeMeasurement = components.get(OBF.VolumeMeasurement);
+    this.volumeMeasurement.world = world;
+    this.volumeMeasurement.color = new THREE.Color("#7a67d8");
+    this.volumeMeasurement.enabled = false;
+
     this.clipper = components.get(OBC.Clipper);
     this.clipper.enabled = false;
     this.clipper.setup();
@@ -227,7 +255,7 @@ export class BimEngine {
 
     if (e.code === "Delete" || e.code === "Backspace") {
       if (this.currentTool === "measure") {
-        this.lengthMeasurement?.delete();
+        this.activeMeasurement()?.delete?.();
       } else if (this.currentTool === "sections" && this.clipper?.enabled) {
         this.clipper.delete(this.world);
       }
@@ -274,9 +302,9 @@ export class BimEngine {
     this.loadedModels.set(model.id, model);
     this.callbacks.onModelLoaded?.(model);
     this.emitStatus("loaded", `${file.name} listo`);
-    await this.fitAll();
     await this.updateCategories();
     await this.extractAlignments(modelId);
+    await this.fitAll();
   }
 
   async loadFragment(file: File) {
@@ -299,9 +327,9 @@ export class BimEngine {
     this.loadedModels.set(model.id, model);
     this.callbacks.onModelLoaded?.(model);
     this.emitStatus("loaded", `${file.name} listo`);
-    await this.fitAll();
     await this.updateCategories();
     await this.extractAlignments(modelId);
+    await this.fitAll();
   }
 
   async exportFragment(modelId: string) {
@@ -342,6 +370,7 @@ export class BimEngine {
       this.world?.scene.three.remove(alignObj);
       this.loadedAlignmentObjects.delete(modelId);
     }
+    this.navigableAlignments.delete(modelId);
     this.alignments = this.alignments.filter((a) => a.modelId !== modelId);
     this.callbacks.onAlignmentsChange?.([...this.alignments]);
 
@@ -349,10 +378,11 @@ export class BimEngine {
     if (this.civilPanelsReady && this.planNavigator) {
       try {
         this.planNavigator.alignments = [];
-        for (const [, alignObj] of this.loadedAlignmentObjects) {
-          const group = alignObj as THREE.Group;
-          this.planNavigator.alignments.push(group);
-          try { this.planNavigator.createStations(group); } catch { /* ignore */ }
+        for (const groups of this.navigableAlignments.values()) {
+          for (const group of groups) {
+            this.planNavigator.alignments.push(group);
+            try { this.planNavigator.createStations(group); } catch { /* ignore */ }
+          }
         }
       } catch { /* ignore */ }
     }
@@ -365,12 +395,36 @@ export class BimEngine {
 
   setActiveTool(tool: ActiveTool) {
     this.currentTool = tool;
-    if (this.lengthMeasurement) {
-      this.lengthMeasurement.enabled = tool === "measure";
-    }
+    this.syncMeasurementTools();
     if (this.clipper) {
       this.clipper.enabled = tool === "sections";
     }
+  }
+
+  setMeasurementKind(kind: MeasurementKind) {
+    this.measurementKind = kind;
+    this.syncMeasurementTools();
+  }
+
+  private syncMeasurementTools() {
+    const active = this.currentTool === "measure";
+    const entries = [
+      ["length", this.lengthMeasurement as unknown as MeasurementTool],
+      ["area", this.areaMeasurement as unknown as MeasurementTool],
+      ["angle", this.angleMeasurement as unknown as MeasurementTool],
+      ["volume", this.volumeMeasurement as unknown as MeasurementTool],
+    ].filter((entry): entry is [MeasurementKind, MeasurementTool] => Boolean(entry[1]));
+
+    for (const [kind, tool] of entries) {
+      tool.enabled = active && this.measurementKind === kind;
+    }
+  }
+
+  private activeMeasurement(): MeasurementTool | null {
+    if (this.measurementKind === "area") return this.areaMeasurement ?? null;
+    if (this.measurementKind === "angle") return this.angleMeasurement ?? null;
+    if (this.measurementKind === "volume") return this.volumeMeasurement ?? null;
+    return this.lengthMeasurement ?? null;
   }
 
   async fitAll() {
@@ -496,78 +550,133 @@ export class BimEngine {
       // Add alignment geometry to the 3D scene
       this.world.scene.three.add(alignmentObj);
       this.loadedAlignmentObjects.set(modelId, alignmentObj);
+      const alignmentGroups = this.getNavigableAlignmentGroups(alignmentObj);
+      this.navigableAlignments.set(modelId, alignmentGroups);
 
-      let initialStation = 0;
-      let totalLength = 0;
-      const elevations: number[] = [];
+      const modelMeta = this.loadedModels.get(modelId);
+      const extracted: AlignmentData[] = [];
 
-      alignmentObj.traverse((child: THREE.Object3D) => {
-        if (typeof child.userData?.initialStation === "number" && !isNaN(child.userData.initialStation)) {
-          initialStation = child.userData.initialStation;
+      for (let index = 0; index < alignmentGroups.length; index++) {
+        const alignmentGroup = alignmentGroups[index];
+        let initialStation = 0;
+        let totalLength = 0;
+
+        alignmentGroup.traverse((child: THREE.Object3D) => {
+          if (typeof child.userData?.initialStation === "number" && !isNaN(child.userData.initialStation)) {
+            initialStation = child.userData.initialStation;
+          }
+          if (typeof child.userData?.length === "number" && !isNaN(child.userData.length) && child.userData.length > 0) {
+            totalLength = Math.max(totalLength, child.userData.length);
+          }
+        });
+
+        try {
+          const civilLength = OBF.CivilUtils.alignmentLength(alignmentGroup);
+          if (typeof civilLength === "number" && Number.isFinite(civilLength) && civilLength > 0) {
+            totalLength = civilLength;
+          }
+        } catch {
+          // Keep userData-derived length if available.
         }
-        if (typeof child.userData?.length === "number" && !isNaN(child.userData.length) && child.userData.length > 0) {
-          totalLength = Math.max(totalLength, child.userData.length);
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const line = child as any;
-        if (line.isLine || line.isLineSegments) {
-          const geo: THREE.BufferGeometry = line.geometry;
-          const pos = geo?.attributes?.position;
-          if (pos) {
-            let segLen = 0;
-            for (let i = 0; i < pos.count - 1; i++) {
-              const ax = pos.getX(i), ay = pos.getY(i), az = pos.getZ(i);
-              const bx = pos.getX(i + 1), by = pos.getY(i + 1), bz = pos.getZ(i + 1);
-              segLen += Math.sqrt((bx-ax)**2 + (by-ay)**2 + (bz-az)**2);
-              elevations.push(ay, by);
+
+        const stationData: AlignmentStation[] = [];
+        if (totalLength > 0) {
+          const steps = Math.min(40, Math.max(8, Math.floor(totalLength / 50)));
+          const stepSize = totalLength / steps;
+
+          for (let i = 0; i <= steps; i++) {
+            const s = initialStation + i * stepSize;
+            const percentage = i / steps;
+            let civilPoint: OBF.CivilPoint | null = null;
+            try {
+              civilPoint = OBF.CivilUtils.alignmentPercentageToPoint(
+                alignmentGroup,
+                percentage,
+              );
+            } catch {
+              civilPoint = null;
             }
-            if (segLen > totalLength) totalLength = segLen;
+            if (!civilPoint) continue;
+            stationData.push({
+              station: s,
+              label: "",
+              elevation: civilPoint.point.y,
+              x: civilPoint.point.x,
+              y: civilPoint.point.y,
+              z: civilPoint.point.z,
+            });
           }
         }
-      });
 
-      const stationData: AlignmentStation[] = [];
-      if (totalLength > 0) {
-        const steps = Math.min(20, Math.max(5, Math.floor(totalLength / 50)));
-        const stepSize = totalLength / steps;
-        const elevMin = elevations.length ? Math.min(...elevations) : 0;
-        const elevMax = elevations.length ? Math.max(...elevations) : 0;
-        const hasRealElev = elevMax - elevMin > 0.1;
-
-        for (let i = 0; i <= steps; i++) {
-          const s = initialStation + i * stepSize;
-          const elev = hasRealElev
-            ? elevMin + ((elevMax - elevMin) * i) / steps
-            : 0;
-          stationData.push({ station: s, label: "", elevation: elev });
+        if (totalLength > 0 && stationData.length >= 2) {
+          extracted.push({
+            modelId,
+            name: alignmentGroups.length > 1
+              ? `${modelMeta?.name ?? modelId} - Eje ${index + 1}`
+              : modelMeta?.name ?? modelId,
+            initialStation,
+            length: totalLength,
+            stations: stationData,
+            hasHorizontal: true,
+            hasVertical: new Set(stationData.map((s) => s.elevation.toFixed(3))).size > 1,
+          });
         }
       }
 
-      const modelMeta = this.loadedModels.get(modelId);
-      const alignData: AlignmentData = {
-        modelId,
-        name: modelMeta?.name ?? modelId,
-        initialStation,
-        length: totalLength,
-        stations: stationData,
-        hasHorizontal: true,
-        hasVertical: stationData.some((s) => s.elevation !== 0),
-      };
-
-      this.alignments = [...this.alignments.filter((a) => a.modelId !== modelId), alignData];
+      this.alignments = [
+        ...this.alignments.filter((a) => a.modelId !== modelId),
+        ...extracted,
+      ];
       this.callbacks.onAlignmentsChange?.([...this.alignments]);
+      if (alignmentGroups.length > 0) {
+        const sampled = extracted.length;
+        this.emitStatus(
+          "loaded",
+          sampled > 0
+            ? `${modelMeta?.name ?? modelId}: ${sampled} alineamiento${sampled !== 1 ? "s" : ""} IFC detectado${sampled !== 1 ? "s" : ""}`
+            : `${modelMeta?.name ?? modelId}: alineamiento IFC detectado sin progresivas muestreables`,
+        );
+      }
 
       // Register with plan navigator if 2D panels are already set up
       if (this.civilPanelsReady && this.planNavigator) {
-        const group = alignmentObj as THREE.Group;
-        if (!this.planNavigator.alignments.includes(group)) {
-          this.planNavigator.alignments.push(group);
-          try { this.planNavigator.createStations(group); } catch { /* ignore */ }
+        for (const group of alignmentGroups) {
+          if (!this.planNavigator.alignments.includes(group)) {
+            this.planNavigator.alignments.push(group);
+            try { this.planNavigator.createStations(group); } catch { /* ignore */ }
+          }
         }
+        try { this.planNavigator.updateAlignments(); } catch { /* ignore */ }
       }
     } catch {
       // Model has no alignment data
     }
+  }
+
+  private getNavigableAlignmentGroups(root: THREE.Object3D): THREE.Group[] {
+    const groups: THREE.Group[] = [];
+    const hasCivilPoints = (object: THREE.Object3D) => {
+      let found = false;
+      object.traverse((child) => {
+        if (found) return;
+        if (Array.isArray(child.userData?.points) && child.userData.points.length >= 6) {
+          found = true;
+        }
+      });
+      return found;
+    };
+
+    for (const child of root.children) {
+      if (child instanceof THREE.Group && hasCivilPoints(child)) {
+        groups.push(child);
+      }
+    }
+
+    if (groups.length === 0 && root instanceof THREE.Group && hasCivilPoints(root)) {
+      groups.push(root);
+    }
+
+    return groups;
   }
 
   /**
@@ -611,16 +720,50 @@ export class BimEngine {
       this.civilPanelsReady = true;
 
       // Add already-loaded alignments to the plan navigator
-      for (const [, alignObj] of this.loadedAlignmentObjects) {
-        const group = alignObj as THREE.Group;
-        if (!this.planNavigator.alignments.includes(group)) {
-          this.planNavigator.alignments.push(group);
-          try { this.planNavigator.createStations(group); } catch { /* no station userData */ }
+      for (const groups of this.navigableAlignments.values()) {
+        for (const group of groups) {
+          if (!this.planNavigator.alignments.includes(group)) {
+            this.planNavigator.alignments.push(group);
+            try { this.planNavigator.createStations(group); } catch { /* no station userData */ }
+          }
         }
       }
+      try { this.planNavigator.updateAlignments(); } catch { /* ignore */ }
     } catch {
       // Civil 2D components not available in this environment
     }
+  }
+
+  async goToStation(modelId: string, station: number) {
+    const alignment = this.alignments.find((item) => item.modelId === modelId);
+    const alignObj = this.navigableAlignments.get(modelId)?.[0];
+    if (!alignment || !alignObj || !this.world) return;
+
+    const percentage = Math.max(
+      0,
+      Math.min(1, (station - alignment.initialStation) / alignment.length),
+    );
+    const civilPoint = OBF.CivilUtils.alignmentPercentageToPoint(
+      alignObj,
+      percentage,
+    );
+    if (!civilPoint) return;
+
+    await this.crossNavigator?.set(civilPoint.point, civilPoint.normal);
+    this.planNavigator?.setMarkerAtPoint?.(civilPoint, "select");
+    this.callbacks.onStationChange?.(station, civilPoint.point.y);
+
+    const cameraOffset = civilPoint.normal.clone().multiplyScalar(90);
+    const eye = civilPoint.point.clone().add(cameraOffset).add(new THREE.Vector3(0, 55, 0));
+    await this.world.camera.controls.setLookAt(
+      eye.x,
+      eye.y,
+      eye.z,
+      civilPoint.point.x,
+      civilPoint.point.y,
+      civilPoint.point.z,
+      true,
+    );
   }
 
   private computeStationFromPoint(point: THREE.Vector3, alignment: AlignmentData): number {

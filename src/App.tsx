@@ -1,6 +1,9 @@
 import {
   ChangeEvent,
+  Component,
   DragEvent,
+  ErrorInfo,
+  ReactNode,
   useEffect,
   useRef,
   useState,
@@ -35,6 +38,7 @@ import {
   CategoryInfo,
   EngineStatus,
   LoadedModel,
+  MeasurementKind,
   SelectionPayload,
 } from "./bim/engine";
 
@@ -49,6 +53,13 @@ const tools: Array<{ key: ToolKey; label: string; icon: typeof Ruler; hint?: str
   { key: "profile",   label: "Perfil",      icon: Mountain,  hint: "Perfil longitudinal sincronizado con el modelo" },
   { key: "buildings", label: "Edificaciones", icon: Building2 },
   { key: "quantities", label: "Cantidades", icon: BarChart3 },
+];
+
+const measurementModes: Array<{ key: MeasurementKind; label: string }> = [
+  { key: "length", label: "Longitud" },
+  { key: "area", label: "Area" },
+  { key: "angle", label: "Angulo" },
+  { key: "volume", label: "Volumen" },
 ];
 
 function App() {
@@ -74,6 +85,8 @@ function App() {
   const [isDragging,   setIsDragging]   = useState(false);
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"3d" | "plan" | "profile" | "section">("3d");
+  const [activeStation, setActiveStation] = useState<number | null>(null);
+  const [measurementKind, setMeasurementKind] = useState<MeasurementKind>("length");
 
   // Engine initialization
   useEffect(() => {
@@ -95,7 +108,9 @@ function App() {
       onProjectionChange:  setIsOrtho,
       onCategoriesChange:  setCategories,
       onAlignmentsChange:  setAlignments,
-      onStationChange: () => { /* future: highlight station in list */ },
+      onStationChange: (station) => {
+        if (typeof station === "number") setActiveStation(station);
+      },
     }).catch((err) => {
       setStatus("error");
       setMessage(err instanceof Error ? err.message : "Error al iniciar motor");
@@ -111,6 +126,10 @@ function App() {
       activeTool === "sections" ? "sections" : "select";
     engineRef.current?.setActiveTool(tool);
   }, [activeTool]);
+
+  useEffect(() => {
+    engineRef.current?.setMeasurementKind(measurementKind);
+  }, [measurementKind]);
 
   // File handlers
   const handleIfcFile = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -174,11 +193,20 @@ function App() {
     }
   };
 
-  // Primary alignment (first model that has one)
+  // Primary alignment read from IFC data. No synthetic civil data is shown.
   const primaryAlignment = alignments[0] ?? null;
+  const hasIfcAlignment = Boolean(primaryAlignment);
+
+  const handleStationSelect = (station: number) => {
+    setActiveStation(station);
+    if (primaryAlignment) {
+      void engineRef.current?.goToStation(primaryAlignment.modelId, station);
+    }
+  };
 
   return (
-    <div className="app-shell">
+    <AppErrorBoundary>
+      <div className="app-shell">
       {/* ── Top bar ── */}
       <header className="topbar">
         <div className="brand">
@@ -264,6 +292,19 @@ function App() {
           <div className={`tool-hint${activeTip ? "" : " tool-hint--hidden"}`}>
             <ChevronRight size={12} />
             <span>{activeTip ?? ""}</span>
+            {activeTool === "measure" && (
+              <div className="measurement-modes" aria-label="Tipo de medicion">
+                {measurementModes.map((mode) => (
+                  <button
+                    key={mode.key}
+                    className={measurementKind === mode.key ? "active" : ""}
+                    onClick={() => setMeasurementKind(mode.key)}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* 3D Viewport — always mounted so WebGL context is preserved */}
@@ -301,18 +342,35 @@ function App() {
             )}
           </div>
 
-          {/* 2D civil panels — always in DOM; shown/hidden via CSS */}
+          {/* 2D civil panels: That Open canvas + technical overlays */}
           <div className="civil-panel" style={{ display: activeView === "plan" ? undefined : "none" }}>
-            <div className="civil-panel-label">Planta — Alineamiento horizontal</div>
+            <div className="civil-panel-label">Planta - Alineamiento horizontal</div>
             <div className="civil-canvas" ref={planPanelRef} />
+            <CivilPlanView
+              alignment={primaryAlignment}
+              activeStation={activeStation}
+              hasIfcAlignment={hasIfcAlignment}
+              onSelectStation={handleStationSelect}
+            />
           </div>
           <div className="civil-panel" style={{ display: activeView === "profile" ? undefined : "none" }}>
-            <div className="civil-panel-label">Perfil longitudinal — Alineamiento vertical</div>
+            <div className="civil-panel-label">Perfil longitudinal - rasante y terreno</div>
             <div className="civil-canvas" ref={elevPanelRef} />
+            <CivilProfileView
+              alignment={primaryAlignment}
+              activeStation={activeStation}
+              hasIfcAlignment={hasIfcAlignment}
+              onSelectStation={handleStationSelect}
+            />
           </div>
           <div className="civil-panel" style={{ display: activeView === "section" ? undefined : "none" }}>
-            <div className="civil-panel-label">Sección transversal — Click en Planta para generar</div>
+            <div className="civil-panel-label">Seccion transversal - progresiva activa</div>
             <div className="civil-canvas" ref={crossPanelRef} />
+            <CrossSectionView
+              alignment={primaryAlignment}
+              activeStation={activeStation}
+              hasIfcAlignment={hasIfcAlignment}
+            />
           </div>
 
           {/* Summary profile strip — shown in 3D view when alignment loaded */}
@@ -324,7 +382,7 @@ function App() {
                   <h2>
                     {primaryAlignment
                       ? `${primaryAlignment.name} · ${primaryAlignment.length.toFixed(0)} m`
-                      : "Sin datos de alineamiento"}
+                      : "Sin alineamiento IFC detectado"}
                   </h2>
                 </div>
                 {primaryAlignment && (
@@ -334,10 +392,13 @@ function App() {
                 )}
               </div>
               {primaryAlignment ? (
-                <AlignmentProfile alignment={primaryAlignment} />
+                <AlignmentProfile
+                  alignment={primaryAlignment}
+                  activeStation={activeStation ?? primaryAlignment.initialStation}
+                />
               ) : (
                 <div className="profile-empty">
-                  Carga un IFC con datos de alineamiento (IfcAlignment) para ver el perfil longitudinal.
+                  Carga un IFC con IfcAlignment para ver progresivas y perfil longitudinal del modelo.
                 </div>
               )}
             </section>
@@ -441,35 +502,66 @@ function App() {
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">Progresivas</span>
-                <h2>{primaryAlignment ? primaryAlignment.name : "Eje de referencia"}</h2>
+                <h2>{primaryAlignment ? primaryAlignment.name : "Sin alineamiento"}</h2>
               </div>
               <Map size={17} />
             </div>
-            {primaryAlignment && primaryAlignment.stations.length > 0 ? (
+            {primaryAlignment ? (
               <div className="station-list">
                 {primaryAlignment.stations.map((s) => (
-                  <button key={s.station}>
+                  <button
+                    key={s.station}
+                    className={activeStation !== null && Math.abs(s.station - activeStation) < 0.1 ? "active" : ""}
+                    onClick={() => handleStationSelect(s.station)}
+                  >
                     <strong>{formatStation(s.station)}</strong>
                     <span>{s.label || "Estacion"}</span>
-                    <em>{s.elevation !== 0 ? `${s.elevation.toFixed(2)} m` : "—"}</em>
+                    <em>{`${s.elevation.toFixed(2)} m`}</em>
                   </button>
                 ))}
               </div>
             ) : (
               <div className="empty-state">
-                {models.length === 0
-                  ? "Carga un IFC con alineamiento para ver las progresivas."
-                  : "El modelo cargado no contiene datos de alineamiento IFC."}
+                Carga un IFC con IfcAlignment para listar progresivas reales del modelo.
               </div>
             )}
           </section>
         </aside>
       </main>
-    </div>
+      </div>
+    </AppErrorBoundary>
   );
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
+
+class AppErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("IFCViewer render error", error, info.componentStack);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="app-shell app-error-shell">
+        <div className="app-error-card">
+          <strong>El visor detuvo el render de la interfaz</strong>
+          <span>{this.state.error.message}</span>
+          <button onClick={() => this.setState({ error: null })}>Reintentar interfaz</button>
+        </div>
+      </div>
+    );
+  }
+}
 
 type ModelRowProps = {
   model: LoadedModel;
@@ -507,7 +599,13 @@ function ModelRow({ model, hasAlignment, onToggleVisibility, onExport, onRemove,
   );
 }
 
-function AlignmentProfile({ alignment }: { alignment: AlignmentData }) {
+function AlignmentProfile({
+  alignment,
+  activeStation,
+}: {
+  alignment: AlignmentData;
+  activeStation: number;
+}) {
   const { stations, initialStation, length } = alignment;
   if (stations.length < 2) {
     return (
@@ -533,6 +631,7 @@ function AlignmentProfile({ alignment }: { alignment: AlignmentData }) {
 
   const toX = (s: number) => PAD_L + ((s - initialStation) / length) * chartW;
   const toY = (e: number) => PAD_T + chartH - ((e - minElev) / elevRange) * chartH;
+  const activeX = toX(Math.max(initialStation, Math.min(initialStation + length, activeStation)));
 
   const points = stations
     .map((s) => `${toX(s.station).toFixed(1)},${toY(s.elevation).toFixed(1)}`)
@@ -558,12 +657,179 @@ function AlignmentProfile({ alignment }: { alignment: AlignmentData }) {
             </g>
           );
         })}
+        <line className="active-station-line" x1={activeX} y1={PAD_T} x2={activeX} y2={PAD_T + chartH} />
       </svg>
       <div className="legend">
         <span><i className="grade-key" />Rasante</span>
         <span style={{ marginLeft: "auto", fontSize: "10px", color: "var(--muted)" }}>
           {formatStation(initialStation)} → {formatStation(initialStation + length)}
         </span>
+      </div>
+    </div>
+  );
+}
+
+function CivilPlanView({
+  alignment,
+  activeStation,
+  hasIfcAlignment,
+  onSelectStation,
+}: {
+  alignment: AlignmentData | null;
+  activeStation: number | null;
+  hasIfcAlignment: boolean;
+  onSelectStation: (station: number) => void;
+}) {
+  if (!alignment || alignment.stations.length < 2 || alignment.length <= 0) {
+    return <CivilEmptyState title="Sin planta de alineamiento" body="Carga un IFC con IfcAlignment para dibujar el eje horizontal y sus progresivas reales." />;
+  }
+
+  const W = 980;
+  const H = 520;
+  const bounds = getPlanBounds(alignment);
+  const toX = (x: number) => 90 + ((x - bounds.minX) / bounds.width) * 790;
+  const toY = (z: number) => 420 - ((z - bounds.minZ) / bounds.depth) * 300;
+  const pathPoints = alignment.stations.map((station) => `${toX(station.x)},${toY(station.z)}`).join(" ");
+  const active = getActiveStation(alignment, activeStation);
+  const activeX = toX(active.x);
+  const activeY = toY(active.z);
+
+  return (
+    <div className="civil-overlay">
+      <div className="civil-card civil-card--summary">
+        <span>{hasIfcAlignment ? "IfcAlignment activo" : "Datos IFC"}</span>
+        <strong>{alignment.name}</strong>
+        <em>{formatStation(alignment.initialStation)} - {formatStation(alignment.initialStation + alignment.length)}</em>
+      </div>
+      <svg className="civil-svg" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Planta de alineamiento">
+        <rect x="0" y="0" width={W} height={H} />
+        <g className="civil-grid">
+          {Array.from({ length: 18 }, (_, i) => <line key={`v-${i}`} x1={i * 60} y1="0" x2={i * 60} y2={H} />)}
+          {Array.from({ length: 10 }, (_, i) => <line key={`h-${i}`} x1="0" y1={i * 60} x2={W} y2={i * 60} />)}
+        </g>
+        <polyline className="alignment-halo" points={pathPoints} />
+        <polyline className="alignment-path" points={pathPoints} />
+        {alignment.stations.map((station) => {
+          const x = toX(station.x);
+          const y = toY(station.z);
+          const isActive = activeStation !== null && Math.abs(station.station - activeStation) < 0.1;
+          return (
+            <g
+              key={station.station}
+              className={`station-marker ${isActive ? "active" : ""}`}
+              onClick={() => onSelectStation(station.station)}
+            >
+              <line x1={x} y1={y - 42} x2={x} y2={y + 42} />
+              <circle cx={x} cy={y} r={isActive ? 8 : 5} />
+              <text x={x + 9} y={y - 11}>{formatStation(station.station)}</text>
+            </g>
+          );
+        })}
+        <g className="active-station-target">
+          <circle cx={activeX} cy={activeY} r="17" />
+          <text x={activeX + 18} y={activeY + 4}>{formatStation(active.station)}</text>
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+function CivilProfileView({
+  alignment,
+  activeStation,
+  hasIfcAlignment,
+  onSelectStation,
+}: {
+  alignment: AlignmentData | null;
+  activeStation: number | null;
+  hasIfcAlignment: boolean;
+  onSelectStation: (station: number) => void;
+}) {
+  if (!alignment || alignment.stations.length < 2 || alignment.length <= 0) {
+    return <CivilEmptyState title="Sin perfil longitudinal" body="Carga un IFC con IfcAlignment vertical para graficar cotas y rasante reales." />;
+  }
+
+  const W = 980;
+  const H = 520;
+  const PAD = { left: 70, top: 60, right: 40, bottom: 70 };
+  const chartW = W - PAD.left - PAD.right;
+  const chartH = H - PAD.top - PAD.bottom;
+  const stations = alignment.stations;
+  const maxElev = Math.max(...stations.map((s) => s.elevation));
+  const minElev = Math.min(...stations.map((s) => s.elevation));
+  const range = maxElev - minElev || 1;
+  const toX = (s: number) => PAD.left + ((s - alignment.initialStation) / alignment.length) * chartW;
+  const toY = (e: number) => PAD.top + chartH - ((e - minElev) / range) * chartH;
+  const grade = stations.map((s) => `${toX(s.station)},${toY(s.elevation)}`).join(" ");
+  const active = getActiveStation(alignment, activeStation);
+  const activeX = toX(active.station);
+  const hasVertical = alignment.hasVertical;
+
+  return (
+    <div className="civil-overlay">
+      <div className="civil-card civil-card--summary">
+        <span>{hasIfcAlignment ? "Perfil desde IFC" : "Datos IFC"}</span>
+        <strong>{formatStation(active.station)}</strong>
+        <em>{hasVertical ? "Cotas leidas del alineamiento cargado" : "Alineamiento sin variacion vertical detectada"}</em>
+      </div>
+      <svg className="civil-svg" viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Perfil longitudinal">
+        <rect x="0" y="0" width={W} height={H} />
+        <g className="civil-grid">
+          {Array.from({ length: 12 }, (_, i) => <line key={`v-${i}`} x1={PAD.left + i * 80} y1={PAD.top} x2={PAD.left + i * 80} y2={PAD.top + chartH} />)}
+          {Array.from({ length: 7 }, (_, i) => <line key={`h-${i}`} x1={PAD.left} y1={PAD.top + i * 60} x2={PAD.left + chartW} y2={PAD.top + i * 60} />)}
+        </g>
+        <polyline className="grade-line-large" points={grade} />
+        <line className="active-profile-line" x1={activeX} y1={PAD.top} x2={activeX} y2={PAD.top + chartH} />
+        {stations.map((s) => (
+          <g key={s.station} className="profile-station" onClick={() => onSelectStation(s.station)}>
+            <circle cx={toX(s.station)} cy={toY(s.elevation)} r={activeStation !== null && Math.abs(s.station - activeStation) < 0.1 ? 7 : 4} />
+            <text x={toX(s.station) - 18} y={PAD.top + chartH + 28}>{formatStation(s.station)}</text>
+          </g>
+        ))}
+        <text className="axis-title" x="22" y="48">Cota</text>
+        <text className="axis-title" x={W - 170} y={H - 25}>Progresiva</text>
+      </svg>
+    </div>
+  );
+}
+
+function CrossSectionView({
+  alignment,
+  activeStation,
+  hasIfcAlignment,
+}: {
+  alignment: AlignmentData | null;
+  activeStation: number | null;
+  hasIfcAlignment: boolean;
+}) {
+  if (!alignment || alignment.stations.length === 0) {
+    return <CivilEmptyState title="Sin seccion transversal" body="Carga un IFC con alineamiento para crear secciones reales desde CivilCrossSectionNavigator." />;
+  }
+
+  const active = getActiveStation(alignment, activeStation);
+
+  return (
+    <div className="civil-overlay">
+      <div className="civil-card civil-card--summary">
+        <span>{hasIfcAlignment ? "Corte vinculado al eje IFC" : "Datos IFC"}</span>
+        <strong>{formatStation(active.station)}</strong>
+        <em>La seccion se genera desde el alineamiento real del modelo.</em>
+      </div>
+      <CivilEmptyState
+        title="Seccion real lista para generarse"
+        body="Selecciona una progresiva. El corte se calcula con CivilCrossSectionNavigator sobre la geometria IFC cargada, no con geometria simulada."
+      />
+    </div>
+  );
+}
+
+function CivilEmptyState({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="civil-overlay">
+      <div className="civil-empty-state">
+        <Layers size={28} />
+        <strong>{title}</strong>
+        <span>{body}</span>
       </div>
     </div>
   );
@@ -577,7 +843,21 @@ function PropertyPanel({ selection }: { selection: SelectionPayload | null }) {
       </div>
     );
   }
-  const first = selection.attributes[0] ?? {};
+  const records = selection.attributes.filter(isRecord);
+  const first = records[0] ?? {};
+  const identity = pickKeys(first, [
+    "GlobalId",
+    "Name",
+    "ObjectType",
+    "PredefinedType",
+    "Tag",
+    "Description",
+    "type",
+    "expressID",
+  ]);
+  const materialGroups = collectMatchingGroups(records, ["material", "matlayer", "layer"]);
+  const propertySets = collectMatchingGroups(records, ["pset", "propertyset", "isdefinedby", "hasproperties"]);
+  const quantitySets = collectMatchingGroups(records, ["qto", "quantity", "quantities"]);
   return (
     <div className="property-panel-content">
       <div className="prop-section">
@@ -588,17 +868,59 @@ function PropertyPanel({ selection }: { selection: SelectionPayload | null }) {
             ? selection.localIds.join(", ")
             : `${selection.localIds.slice(0, 3).join(", ")} +${selection.localIds.length - 3}`} />
       </div>
-      <PropertyGroup label="Atributos IFC" data={first} />
-      {selection.attributes.slice(1).map((attr, i) => (
-        <PropertyGroup key={i} label={`Relación ${i + 1}`} data={attr} />
+      <PropertyGroup label="Identidad IFC" data={identity} emptyText="El elemento no trae campos de identidad en los datos cargados." />
+      <PropertyMatches label="Materiales y asociaciones" matches={materialGroups} emptyText="No se encontraron materiales asociados en este elemento." />
+      <PropertyMatches label="Property sets" matches={propertySets} emptyText="No se encontraron property sets asociados en este elemento." />
+      <PropertyMatches label="Cantidades" matches={quantitySets} emptyText="No se encontraron quantity sets asociados en este elemento." />
+      {records.map((attr, i) => (
+        <PropertyGroup key={i} label={i === 0 ? "Datos IFC completos" : `Relacion IFC ${i}`} data={attr} />
       ))}
     </div>
   );
 }
 
-function PropertyGroup({ label, data }: { label: string; data: Record<string, unknown> }) {
+function PropertyMatches({
+  label,
+  matches,
+  emptyText,
+}: {
+  label: string;
+  matches: Array<{ label: string; data: Record<string, unknown> }>;
+  emptyText: string;
+}) {
+  return (
+    <div className="prop-section">
+      <div className="prop-section-header">{label}</div>
+      {matches.length === 0 ? (
+        <div className="property-note">{emptyText}</div>
+      ) : (
+        matches.map((match, i) => (
+          <PropertyGroup key={`${match.label}-${i}`} label={match.label} data={match.data} />
+        ))
+      )}
+    </div>
+  );
+}
+
+function PropertyGroup({
+  label,
+  data,
+  emptyText,
+}: {
+  label: string;
+  data: Record<string, unknown>;
+  emptyText?: string;
+}) {
   const entries = Object.entries(data).filter(([k, v]) => v !== null && v !== undefined && k !== "type");
-  if (entries.length === 0) return null;
+  if (entries.length === 0) {
+    if (!emptyText) return null;
+    return (
+      <div className="prop-section">
+        <div className="prop-section-header">{label}</div>
+        <div className="property-note">{emptyText}</div>
+      </div>
+    );
+  }
   const primitives = entries.filter(([, v]) => typeof v !== "object" || v === null);
   const nested     = entries.filter(([, v]) => v !== null && typeof v === "object");
   return (
@@ -658,8 +980,107 @@ function PropertyRow({ label, value }: { label: string; value: string }) {
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function pickKeys(data: Record<string, unknown>, keys: string[]) {
+  return keys.reduce<Record<string, unknown>>((picked, key) => {
+    if (key in data && data[key] !== null && data[key] !== undefined) {
+      picked[key] = data[key];
+    }
+    return picked;
+  }, {});
+}
+
+function collectMatchingGroups(values: unknown[], keywords: string[]) {
+  const matches: Array<{ label: string; data: Record<string, unknown> }> = [];
+  const seen = new WeakSet<object>();
+  const normalizedKeywords = keywords.map((keyword) => keyword.toLowerCase());
+
+  const visit = (value: unknown, path: string, depth: number) => {
+    if (matches.length >= 18 || depth > 8) return;
+
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => visit(item, `${path}[${index}]`, depth + 1));
+      return;
+    }
+
+    if (!isRecord(value)) {
+      const lowerPath = path.toLowerCase();
+      if (normalizedKeywords.some((keyword) => lowerPath.includes(keyword))) {
+        matches.push({ label: path || "Valor", data: { value } });
+      }
+      return;
+    }
+
+    if (seen.has(value)) return;
+    seen.add(value);
+
+    const descriptor = [
+      path,
+      value.type,
+      value.Name,
+      value.name,
+      value.ObjectType,
+      value.RelatingMaterial,
+      value.RelatingPropertyDefinition,
+    ]
+      .map((item) => formatSearchToken(item))
+      .join(" ")
+      .toLowerCase();
+
+    if (depth > 0 && normalizedKeywords.some((keyword) => descriptor.includes(keyword))) {
+      matches.push({ label: path || String(value.type ?? "Dato IFC"), data: value });
+    }
+
+    for (const [key, nested] of Object.entries(value)) {
+      if (nested === null || nested === undefined) continue;
+      visit(nested, path ? `${path}.${key}` : key, depth + 1);
+    }
+  };
+
+  values.forEach((value, index) => visit(value, `Elemento ${index + 1}`, 0));
+  return matches;
+}
+
+function formatSearchToken(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (isRecord(value)) {
+    return String(value.type ?? value.Name ?? value.name ?? "");
+  }
+  return "";
+}
+
 function formatIfcType(name: string): string {
   return name.replace(/^IFC/i, "").replace(/([A-Z])/g, " $1").trim();
+}
+
+function getPlanBounds(alignment: AlignmentData) {
+  const xs = alignment.stations.map((station) => station.x);
+  const zs = alignment.stations.map((station) => station.z);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minZ = Math.min(...zs);
+  const maxZ = Math.max(...zs);
+  return {
+    minX,
+    minZ,
+    width: Math.max(maxX - minX, 1),
+    depth: Math.max(maxZ - minZ, 1),
+  };
+}
+
+function getActiveStation(alignment: AlignmentData, activeStation: number | null) {
+  if (activeStation === null) return alignment.stations[0];
+  return alignment.stations.reduce((closest, station) => {
+    return Math.abs(station.station - activeStation) < Math.abs(closest.station - activeStation)
+      ? station
+      : closest;
+  }, alignment.stations[0]);
 }
 
 function getElementName(selection: SelectionPayload): string {
