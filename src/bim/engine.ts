@@ -478,48 +478,59 @@ export class BimEngine {
     if (!fragModel) return;
 
     try {
-      // getAlignments returns a THREE.Object3D group with alignment geometry
       const alignmentObj: THREE.Object3D = await fragModel.getAlignments();
       if (!alignmentObj) return;
 
       this.world.scene.three.add(alignmentObj);
       this.loadedAlignmentObjects.set(modelId, alignmentObj);
 
-      // Extract station data from alignment userData
-      const stationData: AlignmentStation[] = [];
       let initialStation = 0;
       let totalLength = 0;
+      const elevations: number[] = [];
 
       alignmentObj.traverse((child: THREE.Object3D) => {
-        if (child.userData?.initialStation !== undefined) {
-          initialStation = child.userData.initialStation as number;
+        // Read userData if present
+        if (typeof child.userData?.initialStation === "number" && !isNaN(child.userData.initialStation)) {
+          initialStation = child.userData.initialStation;
         }
-        if (child.userData?.length !== undefined) {
-          totalLength = Math.max(totalLength, child.userData.length as number);
+        if (typeof child.userData?.length === "number" && !isNaN(child.userData.length) && child.userData.length > 0) {
+          totalLength = Math.max(totalLength, child.userData.length);
+        }
+
+        // Compute length from line geometry when userData is missing/zero
+        const line = child as any;
+        if (line.isLine || line.isLineSegments) {
+          const geo: THREE.BufferGeometry = line.geometry;
+          const pos = geo?.attributes?.position;
+          if (pos) {
+            let segLen = 0;
+            for (let i = 0; i < pos.count - 1; i++) {
+              const ax = pos.getX(i), ay = pos.getY(i), az = pos.getZ(i);
+              const bx = pos.getX(i + 1), by = pos.getY(i + 1), bz = pos.getZ(i + 1);
+              segLen += Math.sqrt((bx-ax)**2 + (by-ay)**2 + (bz-az)**2);
+              elevations.push(ay, by);
+            }
+            if (segLen > totalLength) totalLength = segLen;
+          }
         }
       });
 
-      // Build evenly-spaced stations if no explicit stations exist
+      // No civil navigator — it produces NaN labels with this model's data format
+      const stationData: AlignmentStation[] = [];
       if (totalLength > 0) {
-        const steps = Math.min(10, Math.floor(totalLength / 50));
-        const stepSize = totalLength / Math.max(steps, 1);
+        const steps = Math.min(20, Math.max(5, Math.floor(totalLength / 50)));
+        const stepSize = totalLength / steps;
+        const elevMin = elevations.length ? Math.min(...elevations) : 0;
+        const elevMax = elevations.length ? Math.max(...elevations) : 0;
+        const hasRealElev = elevMax - elevMin > 0.1;
+
         for (let i = 0; i <= steps; i++) {
           const s = initialStation + i * stepSize;
-          stationData.push({ station: s, label: "", elevation: 0 });
-        }
-      }
-
-      // Try to wire the civil navigator for 3D marker interaction
-      if (this.civilNavigators) {
-        try {
-          const nav = (this.civilNavigators as any).create?.("absolute");
-          if (nav) {
-            nav.world = this.world;
-            nav.alignments.push(alignmentObj);
-            nav.updateAlignments?.();
-          }
-        } catch {
-          // Navigator setup failed, alignment geometry is still visible
+          // Interpolate elevation if we have a meaningful range
+          const elev = hasRealElev
+            ? elevMin + ((elevMax - elevMin) * i) / steps
+            : 0;
+          stationData.push({ station: s, label: "", elevation: elev });
         }
       }
 
@@ -537,7 +548,7 @@ export class BimEngine {
       this.alignments = [...this.alignments.filter((a) => a.modelId !== modelId), alignData];
       this.callbacks.onAlignmentsChange?.([...this.alignments]);
     } catch {
-      // Model has no alignment data — that's fine, stay silent
+      // Model has no alignment data — stay silent
     }
   }
 
